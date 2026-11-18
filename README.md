@@ -85,4 +85,5 @@ success are evaluated separately.
 | [SO101 recording to SFT](docs/so101-data-sft.md) | Recording, dataset checks, transfer, training preparation, and experiment handoff |
 | [PI0.5 SFT and checkpoints](docs/pi05-sft.md) | Training entry points, data contracts, statistics, export, and resume |
 | [SO101 deployment](examples/so101_real/README.md) | GPU policy service, Mac client, observations, robot execution, and logs |
+| [SO101 agent tools](examples/so101_agent/README.md) | Offline observe/move/gripper/hold tools, loopback HTTP, and a synthetic backend |
 | [Distributed architecture](docs/architecture.md) | Cluster, WorkerGroup, Channel, placement, and the Ray boundary |
