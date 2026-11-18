@@ -1,4 +1,4 @@
-"""SO101 agent tools; the shipped backend is offline simulation only."""
+"""SO101 agent tools; mock by default, with an opt-in hardware module."""
 
 from .controller import AgentController
 from .mock import MockBackend
