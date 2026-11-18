@@ -43,6 +43,7 @@ class MockBackend:
 
     name = "mock"
     simulated = True
+    motion_enabled = True
 
     def __init__(self, *, clock: Clock | None = None, following_speed: float = 24.0):
         self.clock = clock or RealClock()

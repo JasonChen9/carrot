@@ -85,12 +85,13 @@ class Backend(Protocol):
 
     read_positions must return measured feedback, not the previous command. Methods
     must have bounded I/O timeouts so hold can acquire the controller lock. Bounds
-    and degree/percent conversions must be validated by a future hardware adapter.
+    and degree/percent conversions must be validated by the hardware adapter.
     No method may silently configure motors, reset the arm or disable torque.
     """
 
     name: str
     simulated: bool
+    motion_enabled: bool
     bounds: Mapping[str, tuple[float, float]]
 
     def read_positions(self) -> dict[str, float]: ...

@@ -57,6 +57,9 @@ class AgentController:
         self._active: str | None = None
         self._cancelled = threading.Event()
         self._fault: str | None = None
+        self._closed = False
+        self._shutdown_result: dict[str, Any] | None = None
+        self._cancel_hold: dict[str, Any] | None = None
 
     def metadata(self) -> dict[str, Any]:
         """Session identity and units; reads no device and issues no commands."""
@@ -65,6 +68,8 @@ class AgentController:
                 "session_id": self.session_id,
                 "backend": self.backend.name,
                 "simulated": self.backend.simulated,
+                "motion_enabled": self.backend.motion_enabled and not self._closed,
+                "closed": self._closed,
                 "units": UNITS.copy(),
                 "bounds": copy.deepcopy(self.bounds),
                 "limits": asdict(self.config),
@@ -75,6 +80,12 @@ class AgentController:
     def _positions(self) -> dict[str, float]:
         return pose(self.backend.read_positions(), self.bounds)
 
+    def _available(self, *, motion: bool = False) -> None:
+        if self._closed:
+            raise AgentError("session_closed", "Controller has shut down", 409)
+        if motion and not self.backend.motion_enabled:
+            raise AgentError("read_only", "Motor writes are disabled in this session", 403)
+
     def observe(self) -> dict[str, Any]:
         """Return measured joints and top/wrist PNGs with capture times and sequences.
 
@@ -83,6 +94,7 @@ class AgentController:
         Image data is base64 PNG; timestamps are session-local monotonic seconds.
         """
         with self._lock:
+            self._available()
             self._observation = None
             try:
                 positions = self._positions()
@@ -191,6 +203,7 @@ class AgentController:
                         "command_in_progress", "Original command is still running", 409
                     )
                 return copy.deepcopy(record["result"])
+            self._available(motion=True)
             if self._active is not None:
                 raise AgentError("busy", "Another command is running", 409)
             if self._fault:
@@ -243,10 +256,12 @@ class AgentController:
         movement requires a fresh observe; hold does not clear a latched fault.
         """
         with self._lock:
+            self._available(motion=True)
             active = self._active
             self._cancelled.set()
             self._revision += 1
             result = self._try_hold()
+            self._cancel_hold = result
             return {
                 "session_id": self.session_id,
                 "simulated": self.backend.simulated,
@@ -254,6 +269,28 @@ class AgentController:
                 "interrupted_command": active,
                 **result,
             }
+
+    def shutdown(self) -> dict[str, Any]:
+        """Close the command gate before releasing hardware; idempotent, read-only aware.
+
+        After this returns neither an active trajectory nor a waiting HTTP request
+        may access the backend. Shutdown holds only a motion-enabled session.
+        """
+        with self._lock:
+            if self._shutdown_result is not None:
+                return copy.deepcopy(self._shutdown_result)
+            self._closed = True
+            self._cancelled.set()
+            self._revision += 1
+            held = self._try_hold() if self.backend.motion_enabled else {"skipped": "read_only"}
+            self._cancel_hold = held
+            self._shutdown_result = {
+                "session_id": self.session_id,
+                "status": "closed",
+                "interrupted_command": self._active,
+                "hold": held,
+            }
+            return copy.deepcopy(self._shutdown_result)
 
     def _execute(
         self, command_id: str, start: dict[str, float], target: dict[str, float], duration: float
@@ -271,6 +308,8 @@ class AgentController:
             "simulated": self.backend.simulated,
             "target": target,
             "start": start,
+            "final_position": start.copy(),
+            "error": {n: target[n] - start[n] for n in JOINTS},
             "status": "failed",
             "trajectory": trace,
         }
@@ -279,15 +318,23 @@ class AgentController:
                 self.clock.wait(self._cancelled, 1 / self.config.hz)
                 with self._lock:
                     now = self.clock.now()
+                    if self._cancelled.is_set():
+                        result.update(status="cancelled", elapsed_s=now - began)
+                        if self._cancel_hold is not None:
+                            result["hold"] = copy.deepcopy(self._cancel_hold)
+                            if self._cancel_hold.get("succeeded"):
+                                current = self._cancel_hold["target"].copy()
+                                result.update(
+                                    final_position=current,
+                                    error={n: target[n] - current[n] for n in JOINTS},
+                                )
+                        break
                     current = self._positions()
                     result.update(
                         final_position=current,
                         elapsed_s=now - began,
                         error={n: target[n] - current[n] for n in JOINTS},
                     )
-                    if self._cancelled.is_set():
-                        result["status"] = "cancelled"
-                        break
                     if now - began > duration + self.config.settle_s:
                         result["status"] = "timeout"
                         raise TimeoutError("Motion did not settle before the deadline")
@@ -328,7 +375,8 @@ class AgentController:
         except BaseException as exc:
             with self._lock:
                 self._fault = f"{type(exc).__name__}: {exc}"
-                result.update(failure=self._fault, hold=self._try_hold())
+                held = {"skipped": "session_closed"} if self._closed else self._try_hold()
+                result.update(failure=self._fault, hold=held)
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     result["status"] = "cancelled"
                     raise
